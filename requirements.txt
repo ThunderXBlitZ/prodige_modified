@@ -1,4 +1,4 @@
-requests==2.18.4
+requests==2.20.0
 # glove_python==0.1.0
 torch==1.4.0
 tqdm==4.43.0
