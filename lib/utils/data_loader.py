@@ -33,7 +33,7 @@ def get_wine():
 # Real-world datasets, load a subset to avoid MemoryError
 # =======================================================
 
-def get_fashion_mnist(num_samples: int=10000):
+def get_fashion_mnist(num_samples: int=10000, num_workers:int = 0):
     train_set = torchvision.datasets.FashionMNIST(
     root = './data/FashionMNIST',
     train = True,
@@ -42,17 +42,17 @@ def get_fashion_mnist(num_samples: int=10000):
         transforms.ToTensor()                             
     ]))
     # total samples: 60000
-    loader = torch.utils.data.DataLoader(train_set, batch_size=60000, num_workers=-1)
+    loader = torch.utils.data.DataLoader(train_set, batch_size=60000, num_workers=num_workers)
     for batch in loader:
         X, y = batch[0], batch[1]
         _dim = X.shape[-1]  # 28 x 28
-        X = X.reshape(num_samples, _dim**2)  # flatten
+        X = X.reshape(60000, _dim**2)  # flatten
         X = _preprocess(X)
         X = X.numpy()
     return X[:num_samples], y[:num_samples]
 
 
-def get_cifar10(num_samples: int=10000):
+def get_cifar10(num_samples: int=10000, num_workers:int = 0):
     train_set = torchvision.datasets.CIFAR10(
         root='./data/CIFAR10',
         train=True,
@@ -61,11 +61,11 @@ def get_cifar10(num_samples: int=10000):
         transforms.ToTensor()
         ]))
     # 60000 samples
-    loader = torch.utils.data.DataLoader(train_set, batch_size=60000, num_workers=-1)
+    loader = torch.utils.data.DataLoader(train_set, batch_size=60000, num_workers=num_workers)
     for batch in loader:
         X, y = batch[0], batch[1]
     _dim = X.shape[-1]  # 32 x 32
-    X = X.reshape(num_samples, _dim**2)  # flatten
+    X = X.reshape(60000, _dim**2)  # flatten
     X = _preprocess(X)
     X = X.numpy()
     return X[:num_samples], y[:num_samples]
