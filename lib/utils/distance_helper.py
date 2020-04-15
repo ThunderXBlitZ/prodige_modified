@@ -19,28 +19,28 @@ def _chunks(iterable, size=10):
         yield chain([first], islice(iterator, size - 1))
 
 
-def compute_simple_pairwise_distance(X):
-    # suitable for toy datasets, memory increases exponentially for large datasets
-    distances = np.square(X[None, :, :] - X[:, None, :]).sum(-1)
-    return X
-
-
-def compute_original_pairwise_distance(X, num_samples:int, temp_filename:str, num_chunks:int = 100, del_tempfile:bool = False):
-    _generator = product(X, repeat=2)
-    distances = pairswise_distance(_generator, num_samples, temp_filename, num_chunks, del_tempfile)
+def compute_original_pairwise_distance(X, simple:bool, num_samples:int = None, temp_filename:str = None, num_chunks:int = 100, del_tempfile:bool = False):
+    if simple:
+        distances = np.square(X[None, :, :] - X[:, None, :]).sum(-1)
+    else:
+        _generator = product(X, repeat=2) 
+        distances = pairwise_distance(_generator, num_samples, temp_filename, num_chunks, del_tempfile)
     return distances
 
 
-def compute_pca_pairwise_distance(X, num_samples:int, temp_filename:str, num_chunks:int = 100, del_tempfile:bool = False):
+def compute_pca_pairwise_distance(X, simple:bool, num_samples:int = None, temp_filename:str = None, num_chunks:int = 100, del_tempfile:bool = False):
     pca = PCA(n_components=4).fit(X)
     # pca = IncrementalPCA(n_components=4, batch_size=batch_size).fit(X)
     X_pca = pca.inverse_transform(pca.transform(X))
-    _generator = product(X_pca, repeat=2)
-    pca_distances = pairswise_distance(_generator, num_samples, temp_filename, num_chunks, del_tempfile)
+    if simple:
+        pca_distances = np.square(X_pca[None, :, :] - X_pca[:, None, :]).sum(-1) ** 0.5
+    else:
+        _generator = product(X_pca, repeat=2)
+        pca_distances = pairwise_distance(_generator, num_samples, temp_filename, num_chunks, del_tempfile)
     return pca_distances
 
 
-def pairswise_distance(_iterator, num_samples:int, temp_filename:str, num_chunks:int = 100, del_tempfile:bool = False):
+def pairwise_distance(_iterator, num_samples:int, temp_filename:str, num_chunks:int = 100, del_tempfile:bool = False):
     # num_samples: number of samples
     # temp_filename: filename for temp HDF5 file created
     # num_chunks: number of chunks to split dataset into for processing per worker 
@@ -63,6 +63,7 @@ def pairswise_distance(_iterator, num_samples:int, temp_filename:str, num_chunks
                 h5f_dataset.resize((h5f_dataset.shape[0] + distances.shape[0]), axis = 0)
                 h5f_dataset[-distances.shape[0]:] = distances
         h5f.close()
+        print("Successfully written results to HDF5 file.")
 
     distances = []
     with h5py.File(filename,'r') as infile:

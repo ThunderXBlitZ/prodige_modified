@@ -12,19 +12,19 @@ def _preprocess(X):
 # Toy datasets of roughly 150 samples
 # ===================================
 
-def load_mnist():
+def get_mnist():
     X, y = load_digits(return_X_y=True)
     X = _preprocess(X)
     return X, y
 
 
-def load_iris():
+def get_iris():
     X, y = load_iris(return_X_y=True)
     X = _preprocess(X)
     return X, y
 
 
-def load_wine():
+def get_wine():
     X, y = load_wine(return_X_y=True)
     X = _preprocess(X)
     return X, y
@@ -33,7 +33,7 @@ def load_wine():
 # Real-world datasets, load a subset to avoid MemoryError
 # =======================================================
 
-def load_fashion_mnist(num_samples: int=10000):
+def get_fashion_mnist(num_samples: int=10000):
     train_set = torchvision.datasets.FashionMNIST(
     root = './data/FashionMNIST',
     train = True,
@@ -52,7 +52,7 @@ def load_fashion_mnist(num_samples: int=10000):
     return X[:num_samples], y[:num_samples]
 
 
-def load_cifar10(num_samples: int=10000):
+def get_cifar10(num_samples: int=10000):
     train_set = torchvision.datasets.CIFAR10(
         root='./data/CIFAR10',
         train=True,
@@ -71,7 +71,7 @@ def load_cifar10(num_samples: int=10000):
     return X[:num_samples], y[:num_samples]
 
 
-def load_faces_in_wild(min_faces_per_person: int=70, resize: float=0.4):
+def get_faces_in_wild(min_faces_per_person: int=70, resize: float=0.4):
     lfw_people = fetch_lfw_people(min_faces_per_person=min_faces_per_person, resize=resize)  # 9.5mb 
     X = lfw_people.data  # shape: (1288, 1850)
     y = lfw_people.target  # 7 labels
@@ -82,7 +82,7 @@ def load_faces_in_wild(min_faces_per_person: int=70, resize: float=0.4):
     return X, y
 
 
-def load_newsgroup_vectors():
+def get_newsgroup_vectors():
     # can fit in memory
     news_vectors = fetch_20newsgroups_vectorized()  # 11.7gb
     X = news_vectors.data.toarray()  # shape: (11314, 130107)
