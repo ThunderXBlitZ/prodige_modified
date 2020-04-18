@@ -66,7 +66,6 @@ jupyter==1.0.0
 jupyter-client==6.1.0
 jupyter-console==6.1.0
 jupyter-core==4.6.3
-Keras==2.3.1
 Keras-Applications==1.0.8
 Keras-Preprocessing==1.1.0
 keyring==10.6.0
@@ -139,7 +138,6 @@ srsly==1.0.2
 ssh-import-id==5.7
 systemd-python==234
 tensorboard==1.14.0
-tensorflow==1.14.0
 tensorflow-estimator==1.14.0
 termcolor==1.1.0
 terminado==0.8.3
