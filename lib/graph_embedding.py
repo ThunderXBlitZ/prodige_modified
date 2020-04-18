@@ -13,6 +13,9 @@ from .cpp import batch_dijkstra
 from .utils import check_numpy, sliced_argmax
 from collections import defaultdict
 import scipy.sparse, scipy.sparse.csgraph
+from sklearn.cluster import KMeans
+from sklearn.neighbors import NearestNeighbors
+
 
 beta_quantile = lambda x, alpha=0.01, beta=0.5: scipy.stats.beta.ppf(x, alpha, beta)
 inverse_softplus = lambda x: np.where(x > 10.0, x, np.log(np.expm1(np.clip(x, 1e-6, 10.0))))
@@ -272,13 +275,13 @@ class GraphEmbedding(nn.Module):
 
         p_keep_edge = torch.sigmoid(self._get_logits(self.edge_adjacency_logits, regularized_indices))
         return lambd * p_keep_edge.mean()
-
+    
+    """
     def compute_hierarchical_prior_penalty(self, *, nonzero_rate, start_i=1, end_i=None, smoothness=0.0, batch_size=None):
-        """
-        Computes quantile-wise penalty approximading EMD between the empirical distribution of edges and
-        - in case smoothness == 0, bernoulli(nonzero_rate, 1 - nonzero_rate)
-        - in case smoothness >0, beta(smoothness * nonzero_rate, smoothness * (1 - nonzero_rate))
-        """
+        # Computes quantile-wise penalty approximading EMD between the empirical distribution of edges and
+        # - in case smoothness == 0, bernoulli(nonzero_rate, 1 - nonzero_rate)
+        # - in case smoothness >0, beta(smoothness * nonzero_rate, smoothness * (1 - nonzero_rate))
+
         assert 0 <= nonzero_rate <= 1 and smoothness >= 0
         device = self.edge_adjacency_logits.device
         end_i = end_i or self.num_edges
@@ -300,6 +303,7 @@ class GraphEmbedding(nn.Module):
             reference[-max(1, int(round(nonzero_rate * batch_size))):] = 1.0
 
         return F.mse_loss(reference, torch.sigmoid(logits_sorted))
+"""
 
     def compute_pairwise_distances(self, indices=None, edge_threshold=0.5, default=None):
         """
@@ -352,7 +356,7 @@ class GraphEmbedding(nn.Module):
         """
         Reports model size
         :param threshold: prunes all edges that have probability less than threshold
-        :return: a dict with 'size_bits', 'num_parameters' and a few other statistics
+        :return: a dict with 'size_bytes', 'num_parameters' and a few other statistics
         """
         num_edges = check_numpy(
             torch.sigmoid(self.edge_adjacency_logits.flatten()[1:]) >= threshold
@@ -361,7 +365,7 @@ class GraphEmbedding(nn.Module):
         num_vertices = num_slices + 1
         trainable_default = int(self.default_distance.requires_grad)
         num_parameters = num_vertices + 2 * num_edges + trainable_default
-        size_bits = (num_edges + num_vertices) * bits_per_int + (num_edges + trainable_default) * bits_per_float
+        size_bytes = ((num_edges + num_vertices) * bits_per_int + (num_edges + trainable_default) * bits_per_float) / 8
         return locals()
 
     def extra_repr(self):
@@ -372,72 +376,87 @@ class GraphEmbedding(nn.Module):
         )
 
 
-class InstanceEmbedding(nn.Module):
-    DIRECTIONS = dict(REAL_TO_VIRTUAL=0, VIRTUAL_TO_REAL=1)
+def make_graph_from_vectors(X, *, knn_edges, random_edges=0, virtual_vertices=0,
+                            deduplicate=True, directed=True, verbose=False, squared=True, **kwargs):
+    """
+    Creates graph embedding from an object-feature matrix,
+    initialize weights with squared euclidian distances |x_i - x_j|^2_2
 
-    def __init__(self, graph_embedding: GraphEmbedding, *, virtual_vertices, direction=None):
-        """
-        This is a graph-based embedding that maps individual indices into a vector of distances to k special nodes
-        :param graph_embedding: GraphEmbedding containing with (n + v) vertices,
-            where n = number of input indices (max index + 1) and v = :virtual_vertices:
-        :param virtual_vertices: the number of (pre existing) special vertices used as targets when computing distance
-        :param direction: either "REAL_TO_VIRTUAL" or "VIRTUAL_TO_REAL" or 0
-            "REAL_TO_VIRTUAL" - runs dijkstra from input vertices to virual ones
-            "VIRTUAL_TO_REAL" - runs dijkstra from virtual vertices to given input vertices
-            None - defaults to whichever direction is more computationally efficient
-                (REAL_TO_VIRTUAL if batch size > virtual_vertices else VIRTUAL_TO_REAL)
-        """
-        super().__init__()
-        self.emb = graph_embedding
-        self.virtual_vertices = virtual_vertices
-        self.num_embeddings = graph_embedding.num_vertices - virtual_vertices
-        self.direction = self.DIRECTIONS.get(direction, direction)
+    The graph consists of three types of edges:
+        * knn edges - connecting vertices to their nearest neighbors
+        * random edges - connecting random pairs of vertices to get smallworld property
+        * edges to virtual_vertices - adds synthetic vertices to task and connect with all other vertices
+                                     (init with k-means)
 
-    def forward(self, input_ix, direction=None, **params):
-        """
-        :param input_ix: input indices to embed, int32[...]
-        :param params: see lib.cpp.batch_dijkstra
-        :param direction: override for direction provided in __init__
-        :return: float32[..., virtual_vertices], distances from every input index to each of virtual vertices
-        """
-        virtual_ix = torch.arange(
-            self.emb.num_vertices - self.virtual_vertices,
-            self.emb.num_vertices,
-            dtype=torch.int64,
-        )
+    :param X: task matrix[num_vertors, vector_dim]
+    :param knn_edges: connects vertex to this many nearest neighbors
+    :param random_edges: adds this many random edges per vertex (long edges for smallworld property)
+    :param virtual_vertices: adds this many new vertices connected to all points, initialized as centroids
+    :param deduplicate: if enabled(default), removes all duplicate edges
+        (e.g. if the edge was first added via :m:, and then added again via :random_rate:
+    :param directed: if enabled, treats (i, j) and (j, i) as the same edge
+    :param verbose: if enabled, prints progress into stdout
+    :param squared: if True, uses squared euclidian distance, otherwise normal euclidian distance
+    :param kwargs: other keyword args sent to :GraphEmbedding.__init__:
+    :rtype: GraphEmbedding
+    """
+    num_vectors, vector_dim = X.shape
+    X = np.require(X, dtype=np.float32, requirements=['C_CONTIGUOUS'])
+    if virtual_vertices != 0:
+        if verbose: print("Creating virtual vertices by k-means")
+        X_clusters = KMeans(virtual_vertices).fit(X).cluster_centers_
+        X = np.concatenate([X, X_clusters])
 
-        # get all unique vertices
-        unique_ix, reorder = torch.unique(input_ix, return_inverse=True)
-        num_unique, num_hidden = unique_ix.shape[0], self.virtual_vertices
+    if verbose:
+        print("Searching for nearest neighbors")
+    try:
+        from faiss import IndexFlatL2
+        index = IndexFlatL2(vector_dim)
+        index.add(X)
+        neighbor_distances, neighbor_indices = index.search(X, knn_edges + 1)
+    except ImportError:
+        warn("faiss not found, using slow knn instead")
+        neighbor_distances, neighbor_indices = NearestNeighbors(n_neighbors=knn_edges + 1).fit(X).kneighbors(X)
 
-        # infer search direction (input -> virtual or virtual -> input)
-        direction = direction or self.direction
-        if direction is None:
-            direction = self.DIRECTIONS['REAL_TO_VIRTUAL'] if num_unique <= num_hidden else self.DIRECTIONS[
-                'VIRTUAL_TO_REAL']
-            if self.emb.directed:
-                direction_name = [name for name, i in self.DIRECTIONS.items() if i == direction][0]
-                warn("InstanceEmbedding will default to direction = {} (embedding = {})".format(direction_name, self))
-                self.direction = direction
+    if verbose:
+        print("Adding knn edges")
+    edges_from, edges_to, distances = [], [], []
+    for vertex_i in np.arange(num_vectors):
+        for neighbor_i, distance in zip(neighbor_indices[vertex_i], neighbor_distances[vertex_i]):
+            if vertex_i == neighbor_i: continue  # forbid loops
+            if neighbor_i == -1: continue  # ANN engine uses -1 for padding
+            if not squared: distance **= 0.5
+            edges_from.append(vertex_i)
+            edges_to.append(neighbor_i)
+            distances.append(distance)
 
-        if direction == self.DIRECTIONS['REAL_TO_VIRTUAL']:
-            from_ix = unique_ix
-            to_ix = virtual_ix.repeat(len(from_ix), 1)
-            pred = self.emb(from_ix, to_ix, **params)
-            target_distances_flat = pred["target_distances"]
-            # ^-- [num_unique, num_hidden]
-            target_distances = target_distances_flat[reorder]
+    if random_edges != 0:
+        if verbose: print("Adding random edges")
+        random_from = np.random.randint(0, num_vectors, num_vectors * random_edges)
+        random_to = np.random.randint(0, num_vectors, num_vectors * random_edges)
+        for vertex_i, neighbor_i in zip(random_from, random_to):
+            if vertex_i != neighbor_i:
+                distance = np.sum((X[vertex_i] - X[neighbor_i]) ** 2)
+                if not squared: distance **= 0.5
+                edges_from.append(vertex_i)
+                edges_to.append(neighbor_i)
+                distances.append(distance)
 
-        elif direction == self.DIRECTIONS['VIRTUAL_TO_REAL']:
-            from_ix = virtual_ix
-            to_ix = unique_ix.repeat(len(from_ix), 1)  # [num_hidden, num_unique]
-            pred = self.emb(from_ix, to_ix, **params)
-            target_distances_flat = pred["target_distances"]
-            # ^-- [num_hidden, num_unique]
-            target_distances = target_distances_flat.t()[reorder]
+    if deduplicate:
+        if verbose: print("Deduplicating edges")
+        unique_edges_dict = {}  # {(from_i, to_i) : distance(i, j)}
+        for from_i, to_i, distance in zip(edges_from, edges_to, distances):
+            edge_iijj = int(from_i), int(to_i)
+            if not directed:
+                edge_iijj = tuple(sorted(edge_iijj))
+            unique_edges_dict[edge_iijj] = distance
 
-        else:
-            raise IndexError("Unknown direction {}".format(direction))
+        edges_iijj, distances = zip(*unique_edges_dict.items())
+        edges_from, edges_to = zip(*edges_iijj)
 
-        self._cached_pred = pred
-        return target_distances
+    edges_from, edges_to, distances = map(np.asanyarray, [edges_from, edges_to, distances])
+    if verbose:
+        print("Total edges: {}, mean edges per vertex: {}, mean distance: {}".format(
+            len(edges_from), len(edges_from) / float(num_vectors), np.mean(distances)
+        ))
+    return GraphEmbedding(edges_from, edges_to, initial_weights=distances, directed=directed, **kwargs)

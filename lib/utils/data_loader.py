@@ -1,11 +1,15 @@
+import pickle
+
 import numpy as np
-from sklearn.datasets import load_digits, load_iris, load_wine, fetch_lfw_people, fetch_20newsgroups_vectorized
+from sklearn.datasets import load_digits, load_iris, load_wine, fetch_lfw_people
 import torch
 import torchvision
 import torchvision.transforms as transforms
 
 
 def _preprocess(X):
+    # scaling: Divide every sample by the root sum of squared elements
+    # axis-1 means back last dim to first
     return X / np.square(X).sum(-1, keepdims=True) ** 0.5   
 
 # ===================================
@@ -45,6 +49,7 @@ def get_fashion_mnist(num_samples: int=10000, num_workers:int = 0):
     loader = torch.utils.data.DataLoader(train_set, batch_size=60000, num_workers=num_workers)
     for batch in loader:
         X, y = batch[0], batch[1]
+        print(X.shape)
         _dim = X.shape[-1]  # 28 x 28
         X = X.reshape(60000, _dim**2)  # flatten
         X = _preprocess(X)
@@ -53,6 +58,7 @@ def get_fashion_mnist(num_samples: int=10000, num_workers:int = 0):
 
 
 def get_cifar10(num_samples: int=10000, num_workers:int = 0):
+    # total training samples: 50000
     train_set = torchvision.datasets.CIFAR10(
         root='./data/CIFAR10',
         train=True,
@@ -60,14 +66,15 @@ def get_cifar10(num_samples: int=10000, num_workers:int = 0):
         transform=transforms.Compose([
         transforms.ToTensor()
         ]))
-    # 60000 samples
-    loader = torch.utils.data.DataLoader(train_set, batch_size=60000, num_workers=num_workers)
+    loader = torch.utils.data.DataLoader(train_set, batch_size=50000, num_workers=num_workers)
+    _transform = np.array([0.2989, 0.5870, 0.1140])  # RGB to BW
     for batch in loader:
         X, y = batch[0], batch[1]
-    _dim = X.shape[-1]  # 32 x 32
-    X = X.reshape(60000, _dim**2)  # flatten
-    X = _preprocess(X)
-    X = X.numpy()
+        X = X.numpy().swapaxes(1, 2).swapaxes(2,3)
+        X = np.array([x.dot(_transform) for x in X])
+        _dim = X.shape[-1]  # 32 x 32
+        X = X.reshape(50000, _dim**2)  # flatten
+        X = _preprocess(X)
     return X[:num_samples], y[:num_samples]
 
 
@@ -76,18 +83,16 @@ def get_faces_in_wild(min_faces_per_person: int=70, resize: float=0.4):
     X = lfw_people.data  # shape: (1288, 1850)
     y = lfw_people.target  # 7 labels
     X = _preprocess(X)
-    # lfw_people.images.shape  # 50 * 37 = 1850
-    # lfw_people.target_names  # 7 people
-    # ['Ariel Sharon' 'Colin Powell' 'Donald Rumsfeld' 'George W Bush', 'Gerhard Schroeder' 'Hugo Chavez' 'Tony Blair']
+    # label names: ['Ariel Sharon' 'Colin Powell' 'Donald Rumsfeld' 'George W Bush', 'Gerhard Schroeder' 'Hugo Chavez' 'Tony Blair']
     return X, y
 
 
 def get_newsgroup_vectors():
-    # can fit in memory
-    news_vectors = fetch_20newsgroups_vectorized()  # 11.7gb
-    X = news_vectors.data.toarray()  # shape: (11314, 130107)
-    y = news_vectors.target  # 20 labels
-    # news_vectors.target_names  # 20 categories
+    X, y = [], []
+    with open('./data/newsgroup_embeddings.bin', 'rb') as _file:
+        X = pickle.load(_file)  # shape: (11314, 512)
+    with open('./data/newsgroup_labels.bin', 'rb') as _file:
+        y = pickle.load(_file)  # 20 labels
     X = _preprocess(X)
     return X, y
 
