@@ -1,162 +1,92 @@
-from collections import defaultdict
+import itertools
 
+from bokeh.models import Circle, Plot, HoverTool
+from bokeh.io import output_file, show
+from bokeh.plotting import figure, ColumnDataSource
+from bokeh.palettes import Category20_20 as palette
+import networkx as nx
 import numpy as np
 import torch
-from bokeh import plotting as pl, models as bm
-from matplotlib import pyplot as plt
-from sklearn.manifold import TSNE
 from torch.nn import functional as F
 
-from lib import GraphEmbedding, check_numpy
+from lib import GraphEmbedding
 
 
-def draw_graph(
-    x,
-    y,
-    edges,
-    radius=10,
-    vertex_alpha=0.5,
-    vertex_color="blue",  # vertex params
-    edge_width=1,
-    edge_alpha=0.5,
-    edge_color="gray",  # edge params
-    width=600,
-    height=400,
-    show=True,
-    **kwargs
-):
-    """ draws an interactive plot for task points with auxilirary info on hover """
-    fig = pl.figure(active_scroll="wheel_zoom", width=width, height=height)
+colors = itertools.cycle(palette)
 
-    # edges
-    edges_ij = [(from_i, to_i) for from_i, to_ix in edges.items() for to_i in to_ix]
+    
+def generate_networkx_graph(emb: GraphEmbedding, vertex_labels:list, 
+                            edge_probability_threshold:float = 0.5):
+    G = nx.Graph()
 
-    def _select_edges(field):
-        if isinstance(field, dict):
-            return [field[from_i][to_i] for from_i, to_i in edges_ij]
-        else:
-            return [field] * len(edges_ij)
-
-    edge_source = bm.ColumnDataSource(
-        {
-            "xx": x[edges_ij].tolist(),
-            "yy": y[edges_ij].tolist(),
-            "alpha": _select_edges(edge_alpha),
-            "color": _select_edges(edge_color),
-            "width": _select_edges(edge_width),
-        }
-    )
-    fig.multi_line(
-        "xx", "yy", color="color", line_width="width", alpha="alpha", source=edge_source
-    )
-
-    # vertices
-    def _maybe_repeat(x, size):
-        if not hasattr(x, "__len__") or len(x) != size:
-            x = [x] * size
-        return x
-
-    vertex_source = bm.ColumnDataSource(
-        {
-            "x": x,
-            "y": y,
-            "color": _maybe_repeat(vertex_color, len(x)),
-            "alpha": _maybe_repeat(vertex_alpha, len(x)),
-            **kwargs,
-        }
-    )
-    fig.scatter(
-        "x",
-        "y",
-        size=radius,
-        color="color",
-        alpha="alpha",
-        name="vertices",
-        source=vertex_source,
-    )
-
-    fig.add_tools(
-        bm.HoverTool(
-            tooltips=[(key, "@" + key) for key in kwargs.keys()], names=["vertices"]
-        )
-    )
-    if show:
-        pl.show(fig)
-    return fig
-
-
-def rgba_to_hex(rgba_matrix):
-    assert rgba_matrix.min() >= 0.0 and rgba_matrix.max() <= 1.0
-    assert rgba_matrix.ndim == 2 and rgba_matrix.shape[1] in (3, 4)
-    colors_hex = []
-    hexify = lambda x: '0' * max(0, 4 - len(hex(int(round(x * 255))))) + hex(int(round(x * 255))).replace('0x', '')
-    for rgba in rgba_matrix:
-        colors_hex.append(
-            "#" + "".join(map(hexify, rgba))
-        )
-    return colors_hex
-
-
-def visualize_embeddings(emb: GraphEmbedding, coords=None, vertex_labels=None,
-                         deterministic=None, edge_probability_threshold=0.5, weighted=False, scale_factor=3.0,
-                         cmap=plt.get_cmap('nipy_spectral_r'), **kwargs):
-    """
-    Draws learned graph using bokeh and some magic. Please set bokeh output (notebook / file / etc.) in advance
-    :type emb: GraphEmbedding
-    :param coords: a matrix[num_vertices, 2] of 2d point vertex coordinates, defaults to TSNE on pairwise distances
-    :param vertex_labels: if given, assigns a label to each vertex and paints it to the respective color
-    :param deterministic: if True, only use edges with p >= 0.5, otherwise sample edges with learned probability
-    :param weighted: if True, edge widths are inversely proportional to their weights, default = all widths are equal
-    :param scale_factor: multiplies edge widths by this number
-    :param cmap: a callable(array) -> rgb(a) matrix used to paint vertices if vertex_labels are specified
-    :param kwargs: see utils.draw_graph
-    """
-    if deterministic is None:
-        deterministic = emb.training
-
-    # handle edges
+    # extract vertices and edges
     from_ix, to_ix = emb.edge_sources, emb.edge_targets
     weights = F.softplus(emb.edge_weight_logits).view(-1).data.numpy()
     mean_weight = weights[1:].mean()
     num_vertices, num_edges = len(emb.slices) - 1, len(from_ix)
     edge_probabilities = torch.sigmoid(emb.edge_adjacency_logits.view(-1)).data.numpy()
-    if deterministic:
-        existence = edge_probabilities >= edge_probability_threshold
-    else:
-        existence = np.random.rand(num_edges) < edge_probabilities
-
-    edge_dict = defaultdict(list)
-    edge_width = defaultdict(dict)
-    for edge_i in range(1, num_edges):  # skip first "technical" loop edge
-        if existence[edge_i]:
-            from_i, to_i, weight = from_ix[edge_i], to_ix[edge_i], weights[edge_i]
-            edge_dict[from_i].append(to_i)
-            edge_width[from_i][to_i] = scale_factor / (weight / mean_weight + 1e-3) \
-                if weighted else 1.0
+    edge_exists = edge_probabilities >= edge_probability_threshold
+    assert num_vertices == len(vertex_labels)
 
     # handle vertices
-    if coords is None:
-        pairwise_distances = emb.compute_pairwise_distances(edge_threshold=edge_probability_threshold)
-        pairwise_distances[np.isinf(pairwise_distances)] = np.max(pairwise_distances[np.isfinite(pairwise_distances)])
-        # ^-- [num_vertices x num_vertices]
-        coords = TSNE(metric='precomputed').fit_transform(pairwise_distances)
+    G.add_nodes_from(list(range(num_vertices)))
+    nx.set_node_attributes(G, {k:v for k, v in enumerate(vertex_labels)}, 'label')
 
-    if vertex_labels is not None:
-        vertex_color = (vertex_labels - np.min(vertex_labels)) * 1.0 / np.max(vertex_labels)
-        vertex_color = rgba_to_hex(cmap(vertex_color)[:, :3])
-    else:
-        vertex_color = 'blue'
+    # handle weighted edges, skip first loop edge
+    edges = [(from_ix[i], to_ix[i], weights[i]) for i in range(1, num_edges) if edge_exists[i]]
+    G.add_weighted_edges_from(edges)
 
-    vertex_stats = dict(
-        vertex_id=np.arange(num_vertices),
-        num_edges=np.array([np.sum(check_numpy(emb.get_edges(i).p_adjacent) >= edge_probability_threshold)
-                            for i in range(emb.num_vertices)], dtype='int32')
-    )
+    return G
 
-    assert coords.shape == (num_vertices, 2)
-    if vertex_labels is not None:
-        assert vertex_labels.shape == (num_vertices,)
-        vertex_stats['label'] = vertex_labels
 
-    return draw_graph(*coords.T, edges=edge_dict, edge_width=edge_width,
-                      vertex_color=vertex_color, **vertex_stats, **kwargs)
+def draw_networkx_graph(G, dataset_name: str, weighted:False, cmap_name:str = 'Spectral32'):
+    # dataset_name: Displayed in titl
+    # weighted: if True, renders edge's width proportional to weight value
+    # cmap_name: Bokeh palette name
+
+    vertex_labels = [y['label'] for x,y in G.nodes(data=True)]
+    unique_labels = list(set(vertex_labels))
+    weights = [data['weight'] for node1, node2, data in G.edges(data=True)]
+
+    plot = figure(title=f"{dataset_name.capitalize()} Prodige Graph", plot_width=600, plot_height=400, 
+                  x_range=(-1.1,1.1), y_range=(-1.1,1.1))
+    layout = nx.spring_layout(G, k=1.1/(G.number_of_nodes()**0.5), iterations=100)
+    
+    nodes, nodes_coordinates = zip(*sorted(layout.items()))
+    nodes_xs, nodes_ys = list(zip(*nodes_coordinates))
+    color = [palette[i] for i in vertex_labels]
+    node_degree = [v for k,v in G.degree()]
+
+    nodes_source = ColumnDataSource(dict(x=nodes_xs, y=nodes_ys, name=nodes, 
+                                         label=vertex_labels, 
+                                         degree=node_degree, color=color))
+    r_circles = plot.circle('x', 'y', source=nodes_source, name= "Node_list", line_color=None, 
+                            size=10, fill_color="color", level = 'overlay') 
+    hover1 = HoverTool(tooltips=[('Node ID', '@name'),('Label','@label'), ('Degree', '@degree')],
+    renderers=[r_circles])
+
+    lines_source = ColumnDataSource(_get_edges_specs(G, layout))    
+    r_lines = plot.multi_line('xs', 'ys', line_width='line_width', 
+                              color='navy', source=lines_source) 
+    hover2 = HoverTool(tooltips=[('Node 1','@from_node'), ('Node 2','@to_node'), ('Weight','@weight')], renderers=[r_lines])
+
+    plot.tools.append(hover1)
+    plot.tools.append(hover2)
+
+    return plot
+
+
+def _get_edges_specs(_network, _layout): 
+    d = dict(xs=[], ys=[], line_width=[],from_node=[],to_node=[], alpha=[])
+    weights = [data['weight'] for u, v, data in _network.edges(data=True)]
+    max_weight = max(weights)
+    calc_alpha = lambda h: 0.1 + 0.6 * (h / max_weight)
+    for u, v, data in _network.edges(data=True):
+        d['xs'].append([_layout[u][0], _layout[v][0]])
+        d['from_node'].append(u)
+        d['to_node'].append(v)
+        d['ys'].append([_layout[u][1], _layout[v][1]])
+        d['line_width'].append(calc_alpha(data['weight']) * 3)
+        d['alpha'].append(calc_alpha(data['weight']))
+    d['weight'] = weights
+    return d
