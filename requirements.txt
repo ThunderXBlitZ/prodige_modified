@@ -14,7 +14,7 @@ colorama==0.4.3
 command-not-found==0.3
 configobj==5.0.6
 constantly==15.1.0
-cryptography==2.9
+cryptography==3.2
 cycler==0.10.0
 decorator==4.4.2
 defusedxml==0.6.0
